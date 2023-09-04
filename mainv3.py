@@ -8,6 +8,7 @@ import random
 import string
 
 # Modelling
+import joblib
 from sklearn.ensemble import RandomForestClassifier, AdaBoostClassifier, ExtraTreesClassifier
 from sklearn.metrics import accuracy_score, confusion_matrix, precision_score, recall_score, ConfusionMatrixDisplay
 from sklearn.model_selection import RandomizedSearchCV, train_test_split
@@ -44,7 +45,7 @@ from datetime import datetime
 from sklearn.metrics import classification_report
 from sklearn import metrics
 
-# import psycopg2
+import psycopg2
 # from psycopg2.extras import RealDictCursor
 from timeit import default_timer as timer
 from datetime import *
@@ -465,6 +466,127 @@ def apply_smote_under(X_pca, y_pca, s, k):
     return X, y
 
 
+# Save the qboost model for prediction
+def saveModel(model, name):
+    # -- Save the model using Pickle --
+    # model_p = 'model.pkl'
+    # pickle.dump(model, open(model_p, 'wb'))
+    # -- Save the model using Joblib --
+    model_file = name + '.pkl'
+    joblib.dump(model, model_file)
+    print('Model Saved :', model)
+
+
+#  Load the model
+def loadModel(model_file):
+    # -- Loading Model from Pickle ----
+    # modelQboost = pickle.load(open(model_file, 'rb'))
+    # -- Loading Model from Joblib ----
+    qboost = joblib.load(model_file)
+    print(qboost)
+    return qboost
+
+
+# Reconstruction of Data for further usage
+def reConstructData(predictions, x_test):
+    # Convert the np array to dataframe
+    df_predictions = pd.DataFrame(predictions, columns=['label'])
+
+    # Concat dataframes horizontally
+    result_data = pd.concat([x_test, df_predictions], axis=1)
+
+    return result_data
+
+
+# Generate a random alphanumeric string in Python
+def random_alphanumeric_string(length):
+    return ''.join(
+        random.choices(
+            string.ascii_letters + string.digits,
+            k=length
+        )
+    )
+
+
+# Create the primary key for insertion into the database
+def createKey(res):
+    key = []
+    if len(res.shape) == 1:
+        date_object = datetime.strptime(res[0].strip(), '%d-%b-%y').date()
+        date_str = date_object.strftime("%y%m%d")
+        time_object = datetime.strptime(res[1].strip(), '%H:%M:%S').time()
+        time_str = time_object.strftime("%H%M%S")
+        key = date_str.strip() + time_str.strip() + random_alphanumeric_string(5).strip()
+    else:
+        for data in res:
+            date_object = datetime.strptime(data[0].strip(), '%d-%b-%y').date()
+            date_str = date_object.strftime("%y%m%d")
+            time_object = datetime.strptime(data[1].strip(), '%H:%M:%S').time()
+            time_str = time_object.strftime("%H%M%S")
+            keyval = date_str.strip() + time_str.strip() + random_alphanumeric_string(5).strip()
+            key = np.append(key, keyval)
+    # print(key)
+    # exit(0)
+    return key
+
+
+# Delete rows from Predictions if needed
+def delRow(data, num, col):
+    return data[data[:, col] != num, :]
+
+
+# Make appropriate changes in the data to update the table
+def insertData(result_data):
+    # The part below formats the data for insertion into DB
+    # Convert Dataframe to array for insertion
+    result_data = result_data.values
+
+    # print(result_data)
+    print(len(result_data.shape))
+
+    # Create new key for the DB table
+    res = createKey(result_data)
+
+    # Insert a new first column with the created keys
+    result_data = np.insert(result_data, 0, res, axis=1)
+
+    # Delete rows from result where the results are NOT ATTACK
+    # result_data = delRow(result_data, -1, (result_data.shape[1] - 1))  # TO DO: Analyse and remove this to permit
+    # all data
+
+    # Process the result_data for DB upload
+    # Store the results to be uploaded in an array
+    result_data[:, 3] = 'No Info'  # TO DO: Change this to include a summary of data that entered
+    result_data[:, -2] = 'IoT'
+    result_data[:, -1] = 'Attack State'  # TO DO: Change this to reflect all data from the dataset
+
+    # Delete 5th (0, 1, 2, 3, 4<-) column(axis=1)  from the result_data np array
+    result_data = np.delete(result_data, obj=4, axis=1)
+
+    # result_data = np.array([str(data).strip() for data in result_data])
+
+    print(result_data)
+
+    # print("Predicted Value (x[" + str(randomtestnum) + "]):" + str(predictions[0]))
+    # print("Test Value (y[" + str(randomtestnum) + "]):" + str(y_test[randomtestnum]))
+    # print(testdata)
+    # print(predictions)
+
+    updateDB(result_data)
+
+    print('DB Updated')
+
+
+#  Insert results into DB
+def updateDB(values):
+    # Define the SQL queries here
+    sql = "insert into scmobility.iotweather(attackid, attackdate, attacktime, severity, " \
+          "categories, attacktype) values(%s, %s, %s, %s, %s, %s);"
+    connect(sql, values)
+    return 0
+
+
+# Use arguments to run the program 0-->Classifier Type; 1-->Number of Components in PCA;
 def main():
     if len(sys.argv) == 1:
         print('No arguments provided. Please provide one among qboost, vqc and pegasos. Exiting now.')
@@ -472,7 +594,7 @@ def main():
     args = sys.argv[1:]
     print(args)
 
-    # Number of components considered for the experiment
+    # Number of components considered for the experiment (2nd argument while running program)
     num = int(args[1])
 
     # Load data into dataframe
@@ -548,12 +670,24 @@ def main():
     print('Training complete...')
 
     # Prediction results with training data
-    #predictions, predict_time = predictModel(model, x_train)
-    #reportResult(y_train, predictions, str(model)[1:6], 'training', train_time, predict_time)
+    predictions, predict_time = predictModel(model, x_train)
+    reportResult(y_train, predictions, str(model)[1:6], 'training', train_time, predict_time)
+
+    # If carrying out the prediction later need to save the model and change the program to include the line below
+    # Load model
+    # model = loadModel('qboost.pkl')  # TO DO: Change the code to include the prediction part separately
 
     # Prediction results with test data
     predictions, predict_time = predictModel(model, x_test)
     reportResult(y_test, predictions, args[0], num, 'test', train_time, predict_time)
+
+    # Reconstruct data
+    result_data = reConstructData(predictions, x_test)
+
+    # Insert data into tables
+    insertData(result_data)
+
+    print('End Program !!!')
 
 
 if __name__ == "__main__":
